@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>try-huck-me (client-obfuscated demo)</title>
+<style>
+  body{background:#071021;color:#e6eef6;font-family:system-ui;padding:40px;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+  .card{background:#0d1622;padding:24px;border-radius:12px;width:340px;box-shadow:0 10px 30px rgba(0,0,0,.6);text-align:center}
+  input{width:100%;padding:10px;border-radius:8px;border:1px solid #233040;background:#071021;color:#e6eef6}
+  button{margin-top:12px;padding:10px 14px;border-radius:8px;border:none;background:#38bdf8;color:#022;font-weight:700;cursor:pointer}
+  #message{margin-top:14px;min-height:24px;color:#94a3b8}
+</style>
+</head>
+<body>
+  <div class="card" id="card">
+    <h2>try-huck-me</h2>
+    <p>パスワードを入力してください</p>
+    <input id="pw" type="password" inputmode="numeric" placeholder="パスワード">
+    <button id="btn">確認</button>
+    <div id="message">ここに結果が表示されます</div>
+    <small style="display:block;margin-top:8px;color:#6b7280">※解析抑止デモ（完全不可視ではありません）</small>
+  </div>
+
+<script>
+/*
+  実装方針（クライアント抑止のベストエフォート）
+  1) コアロジックは base64 化した文字列を eval で実行（実行後内部状態を消去）して難読化
+  2) 右クリックや主要ショートカットを無効化
+  3) DevTools 開放を軽度に検出したらコア照合を無効化（消去）
+  4) console をラップして覗き見を遅らせる
+*/
+
+// --------- 抑止: UIショートカット等を無効化（抑止レベル） ----------
+(function preventShortcuts(){
+  // 右クリック禁止
+  window.addEventListener('contextmenu', e => e.preventDefault(), {capture:true});
+
+  // 主要キー無効化
+  window.addEventListener('keydown', function(e){
+    // F12, Ctrl+Shift+I/J/C, Ctrl+U, Ctrl+Shift+K, Ctrl+Shift+C
+    if (e.key === 'F12') { e.preventDefault(); e.stopPropagation(); return; }
+    if (e.ctrlKey && e.key.toLowerCase() === 'u') { e.preventDefault(); e.stopPropagation(); return; }
+    if (e.ctrlKey && e.shiftKey && ['i','j','c','k'].includes(e.key.toLowerCase())) { e.preventDefault(); e.stopPropagation(); return; }
+    // Mac: Cmd+Option+I -> metaKey + altKey + i
+    if (e.metaKey && e.altKey && e.key.toLowerCase() === 'i') { e.preventDefault(); e.stopPropagation(); return; }
+  }, {capture:true});
+})();
+
+// --------- console を覆い隠す（解析抑止） ----------
+(function hideConsole(){
+  try {
+    const methods = ['log','info','warn','error','debug','dir'];
+    methods.forEach(m => {
+      const orig = console[m].bind(console);
+      // 小さな遅延を入れた wrapper（直接見ると空に見えることがある）
+      console[m] = function(){
+        // noop for interactive inspection; but still forward to avoid completely breaking scripts
+        // forward but after short timeout so immediate console prints are harder to use
+        const args = Array.from(arguments);
+        setTimeout(() => { try { orig(...args); } catch(e){} }, 50);
+      };
+    });
+  } catch(e){}
+})();
+
+// --------- DevTools 検出（複数手法の組み合わせ） ----------
+let __devtools_detected = false;
+
+(function detectDevTools() {
+  // 1) レンダリング幅チェック（DevTools が横に開かれた場合）
+  function sizeCheck() {
+    const threshold = 160;
+    if (window.outerWidth - window.innerWidth > threshold || window.outerHeight - window.innerHeight > threshold) {
+      triggerDetect('size');
+    }
+  }
+
+  // 2) タイミング差（ブレークポイントで止められた場合の検出）
+  let last = performance.now();
+  function timingCheck() {
+    const now = performance.now();
+    if (now - last > 1000) { // 大きい差があればブレーク等の可能性
+      triggerDetect('timing');
+    }
+    last = now;
+  }
+
+  // 3) toString の変化を利用した手法（console オブジェクトの独特な挙動を見る）
+  function consoleProbe() {
+    const el = new Image();
+    Object.defineProperty(el, 'id', {
+      get: function() { triggerDetect('probe'); return ''; }
+    });
+    // console に出力されると getter が呼ばれるのを利用
+    try { console.log(el); } catch(e) {}
+  }
+
+  function triggerDetect(reason) {
+    if (!__devtools_detected) {
+      __devtools_detected = true;
+      try {
+        // 実行中の機密ロジックを無効化（関数置換等はコア内で実施）
+        if (typeof window.__core_disable === 'function') {
+          try { window.__core_disable('devtools:'+reason); } catch(e) {}
+        }
+      } catch(e){}
+    }
+  }
+
+  // 定期チェック
+  setInterval(sizeCheck, 800);
+  setInterval(timingCheck, 700);
+  setInterval(consoleProbe, 1500);
+
+  // 初回も実行
+  sizeCheck();
+  timingCheck();
+})();
+
+
+// --------- コアロジックは base64 で埋め込み、実行後は消去する（難読化） ----------
+(function loadAndRunCore(){
+  // base64 にした IIFE（内部に暗号化データとチェック関数を閉じておく）
+  // この base64 を取得して eval で実行し、返り値で外部へのインターフェースのみ渡す
+  const b64 = (
+    "KGZ1bmN0aW9uKCkgewogICAgLy8gQ29yZSAtICJjbGllbnQtb25seS1wYXNzd29yZCIg" +
+    "CiAgICAvLyBQYXNzd29yZDogIjMyMjEiIC0+IGVuY3J5cHRlZC9jaGVjayAKICAgIC8v" +
+    "IEVuY3J5cHRlZDogWzg3LDg2LDg2LDg1XQogICAgY29uc3QgZW5jID0gWzg3LDg2LDg2" +
+    "LDg1XTsKICAgIC8vIFBhc3Mgd2lsbCBiZSAiMzIyMSIgZm9ybWF0CiAgICBmdW5jdGlv" +
+    "biBjaGVja0lucHV0KHZhbCkgewogICAgICAgIC8vIFllcywgZGF0YSBpcyBpbnB1dCBj" +
+    "aGFycyB0byBjaGFyQ29kZQogICAgICAgIGlmKHZhbC5sZW5ndGggIT09IGVuYy5sZW5n" +
+    "dGgpIHsgcmV0dXJuIGZhbHNlOyB9CiAgICAgICAgY29uc3Qga2V5ID0gMTAwOwogICAg" +
+    "ICAgIGNvbnN0IGVuc0lucHV0ID0gQXJyYXkuZnJvbSh2YWwu" +
+    "bWVwKGNodSkgYXJyb3cpLm1hcCgoYykgPT4gYy5jaGFyQ29kZUF0KDApIC14IGtleSk7" +
+    "CiAgICAgICAgLy8gY29tcGFyZQogICAgICAgIGNvbnN0IG9rID0gZW5jSW5wdXQuZXZl" +
+    "cnkoKCk9PT1lbmNbMF0gfHwgZW5jSW5wdXQuZXZlcnkoKCk9PT1lbmNbMV0gfHwgZW5j" +
+    "SW5wdXQuZXZlcnkoKCk9PT1lbmNbMl0gfHwgZW5jSW5wdXQuZXZlcnkoKCk9PT1lbmNb" +
+    "M10pOwogICAgICAgIHJldHVybiB7ok9rOnB9fQogIH0pKCk7"
+  );
+  // decode and eval
+  try {
+    const src = atob(b64);
+    // execute and capture exported interface
+    const exported = (new Function(src))(); // returns an object like { check: fn, disable: fn }
+    // expose a safe wrapper that calls internal check, but we'll not leak internals
+    if (exported && typeof exported.check === 'function') {
+      // wrapper: performs a devtools check before delegating
+      window.__core_wrapper = async function(pw){
+        if (__devtools_detected) {
+          // If devtools detected, call disable handler if present, and return blocked
+          if (typeof exported.disable === 'function') {
+            try { exported.disable('devtools detected'); } catch(e) {}
+          }
+          return {ok:false, msg:'検出により無効化されました'};
+        }
+        try {
+          const res = await exported.check(pw);
+          return res;
+        } catch(e) {
+          return {ok:false, msg:'エラー'};
+        }
+      };
+      // expose a hook so detector can ask core to wipe itself
+      window.__core_disable = function(reason){
+        try {
+          if (typeof exported.disable === 'function') exported.disable(reason);
+        } catch(e){}
+        // remove references
+        try { for (let k in exported) { exported[k]=null; } } catch(e){}
+      };
+    }
+    // zero out src & b64 for additional difficulty
+    // (note: devtools can still see network/eval etc., but we remove easy references)
+    // eslint-disable-next-line no-param-reassign
+    // (just reassign local names to empty)
+  } catch(e){
+    console.error('core load failed', e);
+  } finally {
+    // Attempt to erase b64 var via reassign (local only)
+    // nothing guaranteed
+  }
+})();
+
+// --------- UI binding ----------
+(function uiBind(){
+  const btn = document.getElementById('btn');
+  const pw = document.getElementById('pw');
+  const msg = document.getElementById('message');
+
+  async function doCheck(){
+    const val = pw.value || '';
+    // call wrapper which delegates to internal exported.check
+    if (typeof window.__core_wrapper !== 'function') {
+      msg.textContent = '機能が無効化されています。';
+      msg.style.color = '#f87171';
+      pw.value = '';
+      return;
+    }
+    const r = await window.__core_wrapper(val);
+    if (r && r.ok) {
+      msg.textContent = r.msg || '成功';
+      msg.style.color = '#34d399';
+    } else {
+      msg.textContent = r && r.msg ? r.msg : 'パスワードが違います。';
+      msg.style.color = '#f87171';
+    }
+    pw.value = '';
+  }
+
+  btn.addEventListener('click', doCheck);
+  pw.addEventListener('keydown', e => { if (e.key==='Enter') doCheck(); });
+})();
+</script>
+</body>
+</html>
+
